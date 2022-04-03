@@ -24,7 +24,7 @@ def train_model(args: Namespace,
                 train_dl: DataLoader, dev_dl: DataLoader,
                 optimizer: torch.optim.Optimizer, scheduler) -> (Dict, Dict):
 
-    best_score, best_model_weights = {'dev_target_f1': 0}, None
+    best_score, best_model_weights = {'dev_target_f1': 0, 'loss_dev': 1}, None
     loss_fct = torch.nn.CrossEntropyLoss()
     model.train()
     for ep in range(args.epochs):
@@ -53,20 +53,28 @@ def train_model(args: Namespace,
             if step > 0 and step == ((step_per_epoch)//2):
                 current_val = eval_model(args, model, dev_dl)
                 print(f"epoch {ep}, step {step}", current_val, flush=True)
-                if current_val['dev_target_f1'] > best_score['dev_target_f1']:
-                    best_score = current_val
-                    best_model_weights = model.state_dict()
+                result = eval_model(args, model, test_dl)
+                print('Test on test ds', result, flush=True)
+                result = eval_model(args, model, test_dl_nei)
+                print('Test on nei ds', result, flush=True)
+
+                if current_val['dev_target_f1'] >= best_score['dev_target_f1']:
+                    best_score = copy.deepcopy(current_val)
+                    best_model_weights = copy.deepcopy(model.state_dict())
                 model.train()
 
         current_val = eval_model(args, model, dev_dl)
         current_val.update(current_train)
         print(f"epoch {ep}, step {step}", current_val, flush=True)
-        if current_val['dev_target_f1'] > best_score['dev_target_f1']:
-            best_score = current_val
-            best_model_weights = model.state_dict()
+        result = eval_model(args, model, test_dl)
+        print('Test on test ds', result, flush=True)
+        result = eval_model(args, model, test_dl_nei)
+        print('Test on nei ds', result, flush=True)
+        if current_val['dev_target_f1'] >= best_score['dev_target_f1']:
+            best_score = copy.deepcopy(current_val)
+            best_model_weights = copy.deepcopy(model.state_dict())
 
         model.train()
-
     return best_model_weights, best_score
 
 
@@ -122,45 +130,42 @@ def eval_model(args,
 
 def add_precomputed(args, dataset, nei_id):
     positive_key = f'pos_sents_{args.positives_type}'
-    postive_perturb_key = f'{args.positives_type}_sent_perturbs'
+    # postive_perturb_key = f'{args.positives_type}_sent_perturbs'
     additional_instances = []
     ds_id_positive_sentences = {}
     print("Initial dataset size", len(dataset.dataset))
     additional_positives = defaultdict(lambda: [])
-    additional_negatives = defaultdict(lambda: [])
+    additional_negatives = []
     additional_sent_negatives = defaultdict(lambda: [])
-    additional_types = defaultdict(lambda: [])
-    additional_n_const_pos = defaultdict(lambda: [])
+    additional_nei = defaultdict(lambda: [])
+    # additional_n_const_pos = defaultdict(lambda: [])
+    additional_n_const_pos = []
     with open(args.perturbations) as out:
         lines = json.load(out)
         for line in lines:
+            # line = json.loads(line)
             if str(line['ds_id']) in additional_positives:
                 continue
 
-            if line['label'] == nei_id and not args.use_nei:
-                continue
             claim_tokens = set([w.lower() for w in word_tokenize(line['claim'])])
-            # evidence_tokens = set([w.lower() for w in word_tokenize(' '.join([x[1] for x in line['text']]))])
             pos_overlap = []
-            perturb_overlap = []
-            for pos_sent_id, pos_sent in enumerate(line[positive_key]):
+            # perturb_overlap = []
+            for pos_sent_id, pos_sent in enumerate(line['pos_sents_word']):
                 pos_sent_overlap_num = len(set([w.lower() for w in word_tokenize(pos_sent[1])]).intersection(claim_tokens))
                 pos_overlap.append((pos_sent, pos_sent_overlap_num))
-                for perturb_id, perturb in enumerate(line[postive_perturb_key].get(str(pos_sent_id), [])):
-                    perturb_overlap_num = len(set([w.lower() for w in word_tokenize(perturb['removed'])]).intersection(claim_tokens))
-                    perturb_sent = copy.deepcopy(pos_sent)
-                    perturb_sent[1] = perturb['new_sent']
-                    perturb_overlap.append((perturb_sent, perturb_overlap_num))  # TODO add min overlap as hyperparam
+                # for perturb_id, perturb in enumerate(line[postive_perturb_key].get(str(pos_sent_id), [])):
+                #     perturb_overlap_num = len(set([w.lower() for w in word_tokenize(perturb['removed'])]).intersection(claim_tokens))
+                #     perturb_sent = copy.deepcopy(pos_sent)
+                #     perturb_sent[1] = perturb['new_sent']
+                #     perturb_overlap.append((perturb_sent, perturb_overlap_num))  # TODO add min overlap as hyperparam
 
             pos_overlap = list(sorted(pos_overlap, key=lambda x: x[-1], reverse=True))[:args.max_positives]
-            perturb_overlap = list(sorted(perturb_overlap, key=lambda x: x[-1], reverse=True))[:args.max_positives]
+            # perturb_overlap = list(sorted(perturb_overlap, key=lambda x: x[-1], reverse=True))[:args.max_positives]
             all_positives = []
             if 'p_sent' in args.positives_mode and pos_overlap:
-                all_positives += pos_overlap[:args.max_positives]
-                additional_types[str(line['ds_id'])].append('p_sent')
-            if 'p_sent_const' in args.positives_mode and perturb_overlap:
-                all_positives += perturb_overlap
-                additional_types[str(line['ds_id'])].append('p_sent_const')
+                all_positives += pos_overlap
+            # if 'p_sent_const' in args.positives_mode and perturb_overlap:
+            #     all_positives += perturb_overlap
             if all_positives:
                 ds_id_positive_sentences[line['ds_id']] = all_positives
 
@@ -175,8 +180,11 @@ def add_precomputed(args, dataset, nei_id):
                     negative = copy.deepcopy(line)
                     negative['text'] = [s[0]]
                     negative['label'] = nei_id
-                    additional_n_const_pos[str(line['ds_id'])].append(negative)
-                    additional_types[str(line['ds_id'])].append('n_sent')
+                    # negative['ds_id'] = line['ds_id']
+                    negative['overlap'] = s[1]
+                    # additional_n_const_pos[str(line['ds_id'])].append(negative)
+                    # additional_n_const_pos[str(line['ds_id'])].append(negative)
+                    additional_n_const_pos.append(negative)
 
     # collect all predictions on the negative augmentations
     if 'n_const' in args.negatives_mode or 'n_const_pos' in args.negatives_mode:
@@ -185,107 +193,137 @@ def add_precomputed(args, dataset, nei_id):
         for i, (model_name, model_preds) in enumerate(zip(args.other_models, args.serialized_predictions_path)):
             with open(model_preds) as out:
                 for instance in json.load(out):
-                    if not args.use_nei and int(instance['label']) == nei_id:
-                        continue
                     ds_id = str(instance['ds_id'])
                     ds_id_instance[ds_id] = instance
                     for sent_id in instance['orig_sent_perturbs'].keys():
                         for sent in instance['orig_sent_perturbs'][sent_id]:
                             new_sent = sent['new_sent']
-                            # if int(instance['label']) != nei_id:
-                                # pred = int(sent[f'pred_{model_name}'])
-                            pred = sent[f'logits_{model_name}']
-                            # else:
-                            #     pred = nei_id
-                            dsid_sentid_newsent_predictions[ds_id][sent_id][new_sent] += [pred]
+                            if f'logits_{model_name}' in sent:
+                                pred = sent[f'logits_{model_name}']
+                                dsid_sentid_newsent_predictions[ds_id][sent_id][new_sent] += [pred]
 
         for ds_id, sentences in dsid_sentid_newsent_predictions.items():  # TODO sort negatives by disagr/conf
-            current_negatives = 0
             for sent_id, new_sentences in sentences.items():
                 for new_sent, predictions in new_sentences.items():
-                    # pred, count = Counter(predictions).most_common(1)[0]
-
-                    # if pred == int(ds_id_instance[ds_id]['label']) and 'same' not in args.disagreements_mode:
-                    #     continue
-                    # if pred == int(nei_id) and 'diff' not in args.disagreements_mode:
-                    #     continue
                     instance = ds_id_instance[ds_id]
-                    preds_avg = [np.mean([predictions[j][i] for j in range(len(predictions))]) for i in range(len(predictions[i]))]
-                    pred = np.argmax(preds_avg)
-                    if pred == NEI_LABEL and preds_avg[pred] >= args.min_nei_preds and int(sent_id) < len(instance['text']):
-                            # len(additional_negatives[ds_id]) < len(args.positives_mode)*args.max_negatives and \
-                        if 'n_const' in args.negatives_mode:
+                    preds = [np.argmax(predictions[i]) for i in range(len(predictions))]
+
+                    if instance['label'] == NEI_LABEL and args.use_nei:
+                        if preds.count(NEI_LABEL) != 3:
                             instance_new = copy.deepcopy(instance)
                             instance_new['text'][int(sent_id)][1] = new_sent
-                            instance_new['label'] = pred
-                            instance_new['cl'] = 'neg'
-                            additional_negatives[ds_id].append(instance_new)
-                            additional_types[ds_id].append('n_const')
-                        # if 'n_const_pos' in args.negatives_mode :
-                        #     instance_new = copy.deepcopy(instance)
-                        #     instance_new['text'][int(sent_id)][1] = new_sent
-                        #     instance_new['text'] += [random.choice(ds_id_positive_sentences[ds_id])[0]]
-                        #     instance_new['label'] = pred
-                        #     additional_negatives[str(ds_id)].append(instance_new)
-                        #     additional_types[str(ds_id)].append('n_const_pos')
+                            instance_new['label'] = NEI_LABEL
+                            instance_new['cl'] = 'pos'
+                            additional_nei[ds_id].append(instance_new)
 
+                    elif instance['label'] != NEI_LABEL:
+                        predicted_majority, count = Counter(preds).most_common(1)[0]
+                        preds_avg = [np.mean([predictions[i][j] for i in range(len(predictions))]) for j in range(len(predictions[0]))]
+                        if count >= args.min_nei_counts and predicted_majority == NEI_LABEL and preds_avg[NEI_LABEL] >= args.min_nei_preds and int(sent_id) < len(instance['text']):
+                            if 'n_const' in args.negatives_mode:
+                                instance_new = copy.deepcopy(instance)
+                                instance_new['text'][int(sent_id)][1] = new_sent
+                                instance_new['label'] = NEI_LABEL
+                                instance_new['cl'] = 'neg'
+                                instance_new['pred_avg'] = preds_avg[NEI_LABEL]
+                                instance_new['ds_id'] = ds_id
+                                instance_new['pred_avg'] = preds_avg[NEI_LABEL]
+                                additional_negatives.append(instance_new)
+
+    new_sent_instances = []
     if 'n_sent' in args.negatives_mode:
         ds_id_instance = {}
         dsid_sentid_newsent_predictions_sents = defaultdict(lambda: defaultdict(lambda: []))
         for i, (model_name, model_preds) in enumerate(zip(args.other_models, args.serialized_sentence_predictions_path)):
             with open(model_preds) as out:
                 for instance in json.load(out):
-                    if not args.use_nei and int(instance['label']) == nei_id:
-                        continue
                     ds_id = str(instance['ds_id'])
                     ds_id_instance[ds_id] = instance
+                    if 'sent_perturbs' not in instance:
+                        continue
                     for sent_id in instance['sent_perturbs'].keys():
-                        pred = instance['sent_perturbs'][sent_id][f'logits_{model_name}']
-                        dsid_sentid_newsent_predictions_sents[ds_id][sent_id] += [pred]
+                        if f'logits_{model_name}' in instance['sent_perturbs'][sent_id]:
+                            pred = instance['sent_perturbs'][sent_id][f'logits_{model_name}']
+                            dsid_sentid_newsent_predictions_sents[ds_id][sent_id] += [pred]
 
         for ds_id, sentences in dsid_sentid_newsent_predictions_sents.items():  # TODO sort negatives by disagr/conf
             for sent_id, predictions in sentences.items():
                 instance = ds_id_instance[ds_id]
-                preds_avg = [np.mean([predictions[j][i] for j in range(len(predictions))]) for i in range(len(predictions[i]))]
-                pred = np.argmax(preds_avg)
-                if pred == NEI_LABEL and preds_avg[pred] >= args.min_nei_preds and int(sent_id) < len(instance['text']):
-                        # len(additional_negatives[ds_id]) < len(args.positives_mode)*args.max_negatives and \
-                    if 'n_const' in args.negatives_mode:
-                        instance_new = copy.deepcopy(instance)
-                        instance_new['text'] = instance_new['text'][:int(sent_id)] + instance_new['text'][int(sent_id)+1:]
-                        instance_new['label'] = pred
-                        instance_new['cl'] = 'neg'
-                        additional_sent_negatives[ds_id].append(instance_new)
-                        # additional_types[ds_id].append('n_const')
+                preds = [np.argmax(predictions[i]) for i in range(len(predictions))]
+                if instance['label'] != NEI_LABEL:
+                    predicted_majority, count = Counter(preds).most_common(1)[0]
+                    preds_avg = [np.mean([predictions[i][j] for i in range(len(predictions))]) for j in
+                                 range(len(predictions[0]))]
+                    if count >= args.min_nei_counts_sent and preds_avg[NEI_LABEL] >= args.min_nei_preds_sent and \
+                            predicted_majority == NEI_LABEL and int(sent_id) < len(instance['text']):
+                        if 'n_sent' in args.negatives_mode:
+                            instance_new = copy.deepcopy(instance)
+                            instance_new['text'] = instance_new['text'][:int(sent_id)] + instance_new['text'][int(sent_id)+1:]
+                            instance_new['label'] = NEI_LABEL
+                            instance_new['cl'] = 'neg'
+                            instance_new['ds_id'] = ds_id
+                            instance_new['pred_avg'] = preds_avg[NEI_LABEL]
+                            new_sent_instances.append(instance_new)
+                            additional_sent_negatives[ds_id].append(instance_new)
 
-    for t in args.positives_mode+args.negatives_mode:
-        print(t, len([t for ap in additional_types.values() if t in ap]))
-    print(list(additional_types.values())[0:5])
-    print(args.positives_mode+args.negatives_mode)
+    added_pos = set()
+    print(len(additional_sent_negatives),len(additional_negatives), len(additional_n_const_pos))
     instances_pos, instances_sent_neg = [], []
-    # if not args.positives_mode:
-    #     for ds_id in additional_negatives.keys():
-    #         additional_instances += additional_negatives[str(ds_id)]#[:args.max_negatives]
-    #
-    # elif not args.negatives_mode:
-    #     for ds_id in additional_positives.keys():
-    #         additional_instances += additional_positives[str(ds_id)][:args.max_positives]
-    # else:
-    for ds_id in additional_negatives.keys():
-        # if ds_id in additional_positives and all([m in additional_types[str(ds_id)] for m in args.positives_mode+args.negatives_mode]):
-        additional_instances += additional_negatives[str(ds_id)]
-        instances_pos += random.sample(additional_positives[str(ds_id)],min(args.max_positives, len(additional_positives[str(ds_id)])))
+    additional_negatives_sampled = random.choices(additional_negatives,
+                                                weights=[i['pred_avg'] for i in additional_negatives],
+                                                k=min(len(additional_negatives), args.sample_instances))
 
-    for ds_id in additional_sent_negatives.keys():
-        instances_sent_neg += random.sample(additional_sent_negatives[str(ds_id)], min(args.max_negatives, len(additional_sent_negatives[str(ds_id)])))
+    for instance in additional_negatives_sampled:
+        ds_id = instance['ds_id']
+        additional_instances += [instance]
+        if ds_id not in added_pos:
+            added_pos.add(ds_id)
+            instances_pos += random.sample(additional_positives[str(ds_id)],min(args.max_positives, len(additional_positives[str(ds_id)])))
+
+    # instances_sent_neg_sorted = sorted(new_sent_instances, key=lambda x: x['pred_avg'])[:args.sample_instances]
+    if new_sent_instances:
+        instances_sent_neg_samples = random.choices(new_sent_instances,
+                                                    weights=[i['pred_avg'] for i in new_sent_instances],
+                                                    k=min(len(additional_sent_negatives.keys()), args.sample_instances))
+        for instance in instances_sent_neg_samples:
+            instances_sent_neg.append(instance)
+            if instance['ds_id'] not in added_pos:
+                added_pos.add(instance['ds_id'] )
+                instances_pos += random.sample(additional_positives[str(instance['ds_id'])], min(args.max_positives, len(additional_positives[str(instance['ds_id'])])))
+
+    # for ds_id in random.sample(list(additional_sent_negatives.keys()), min(len(additional_sent_negatives.keys()), args.sample_instances)):
+    #     instances_sent_neg += random.sample(additional_sent_negatives[str(ds_id)], min(args.max_negatives, len(additional_sent_negatives[str(ds_id)])))
+    #     if ds_id not in added_pos:
+    #         added_pos.add(ds_id)
+    #         instances_pos += random.sample(additional_positives[str(ds_id)],
+    #                                    min(args.max_positives, len(additional_positives[str(ds_id)])))
     insances_n_const_pos = []
-    for ds_id in additional_n_const_pos.keys():
-        insances_n_const_pos += random.sample(additional_n_const_pos[str(ds_id)],
-                                            min(args.max_negatives, len(additional_n_const_pos[str(ds_id)])))
+    if 'n_sent_pos' in args.negatives_mode:
 
-    additional_instances += random.sample(instances_sent_neg, min(len(instances_sent_neg), 2000))
-    additional_instances += random.sample(instances_pos, min(len(instances_pos),2000))
-    additional_instances += random.sample(insances_n_const_pos,min(len(insances_n_const_pos), 2000))
+        additional_n_const_pos_sampled = random.choices(additional_n_const_pos,
+                       weights=[i['overlap'] for i in additional_n_const_pos],
+                       k=min(len(additional_n_const_pos), args.sample_instances))
+
+
+        for instance in additional_n_const_pos_sampled:
+            insances_n_const_pos += [instance]
+            ds_id = instance['ds_id']
+            if ds_id not in added_pos:
+                added_pos.add(ds_id)
+                instances_pos += random.sample(additional_positives[str(ds_id)],
+                                           min(args.max_positives, len(additional_positives[str(ds_id)])))
+
+    insances_nei = []
+    if args.use_nei:
+        for ds_id in random.sample(list(additional_nei.keys()), min(len(additional_nei), args.sample_instances)):
+            insances_nei += random.sample(additional_nei[str(ds_id)],
+                                                min(args.max_negatives, len(additional_n_const_pos[str(ds_id)])))
+
+    print(len(additional_instances), len(instances_sent_neg), len(instances_pos), len(insances_n_const_pos), len(insances_nei))
+    additional_instances += instances_sent_neg
+    additional_instances += instances_pos
+    additional_instances += insances_n_const_pos
+    additional_instances += insances_nei
 
     print(f'Total added {len(additional_instances)}')
     return additional_instances
@@ -295,6 +333,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--gpu", help="Flag for training on gpu",
                         action='store_true', default=False)
+    parser.add_argument("--run", help="Random seed", type=int, default=1)
     parser.add_argument("--seed", help="Random seed", type=int, default=73)
     parser.add_argument("--labels", help="num of lables", type=int, default=6)
     parser.add_argument("--dataset", help="Flag for training on gpu",
@@ -351,8 +390,31 @@ if __name__ == "__main__":
     parser.add_argument("--positives_mode", choices=['p_sent', 'p_sent_const'], default=[], nargs='+')
     parser.add_argument("--negatives_mode", choices=['n_sent', 'n_const', 'n_sent_pos', 'n_const_pos'], default=[], nargs='+')
     parser.add_argument("--disagreements_mode", choices=['diff', 'same'], default=None, nargs='+')
+    parser.add_argument("--sample_instances", help="Number of augmented instances to add to the training dataset", type=int, default=2000)
+    parser.add_argument("--min_nei_counts", help="Minumum number of other models prediction NEI", type=int, default=3)
+    parser.add_argument("--min_nei_counts_sent", help="Minumum number of other models prediction NEI", type=int, default=3)
+    parser.add_argument("--min_nei_preds_sent", help="Minumum number of other models prediction NEI", type=float, default=2)
 
     args = parser.parse_args()
+    seeds = [73, 13, 42]
+    args.seed = seeds[args.run - 1]
+    args.current_model = args.current_model + f'_{args.run}'
+    args.model_path = f"models_test/{args.dataset}_{args.current_model}"
+    if args.augment:
+        args.model_path = args.model_path + '_cl_aug'
+    args.model_path = args.model_path + f'_{args.run}'
+    args.other_models = [f'roberta_{args.run}', f'bert_{args.run}', f'albert_{args.run}']
+    args.serialized_predictions_path = [
+        f"data/{args.dataset}_{args.other_models[i]}_train_precomputed_predictions.json"
+        for i in range(len(args.other_models))
+    ]
+    print(args.serialized_predictions_path)
+    args.perturbations = f"data/{args.dataset}_train_word_precomputed_perturbations.json"
+    args.serialized_sentence_predictions_path  = [
+        f"data/{args.dataset}_{args.other_models[i]}_train_precomputed_sentence_predictions.json"
+        for i in range(len(args.other_models))
+    ]
+
     print(args)
     random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -474,18 +536,3 @@ if __name__ == "__main__":
         print('Test on test ds', result, flush=True)
         result = eval_model(args, model, test_dl_nei)
         print('Test on nei ds', result, flush=True)
-
-
-"""
-python3.8 modeling/train.py --gpu --dataset fever --dataset_dir /image/image-copenlu/generating-adversarial-claims/data/ --model_path models/fever_oracle_bert_1e5 --lr 1e-5 --pretrained_path 'bert-base-uncased' --labels 3 --mode test_from_file --test_dir data/fever_nei.jsonl
-python3.8 modeling/train.py --gpu --dataset fever --dataset_dir /image/image-copenlu/generating-adversarial-claims/data/ --model_path models/fever_oracle_roberta_1e5 --lr 1e-5 --pretrained_path 'roberta-base' --labels 3 --epochs 3 --mode test_from_file --test_dir data/fever_nei.jsonl
-python3.8 modeling/train.py --gpu --dataset fever --dataset_dir /image/image-copenlu/generating-adversarial-claims/data/ --model_path models/fever_oracle_albert_1e5 --lr 1e-5 --pretrained_path 'albert-base-v2' --labels 3 --epochs 3 --mode test_from_file --test_dir data/fever_nei.jsonl
-
-python3.8 modeling/train.py --gpu --dataset hover --dataset_dir data/ --model_path models/hover_bert_1e5 --lr 1e-5 --pretrained_path 'bert-base-uncased' --labels 2 --epochs 2 --mode test_from_file --test_dir data/hover_nei.jsonl
-python3.8 modeling/train.py --gpu --dataset hover --dataset_dir data/ --model_path models/hover_roberta_1e5 --lr 1e-5 --pretrained_path 'roberta-base' --labels 2 --epochs 2 --mode test_from_file --test_dir data/hover_nei.jsonl
-python3.8 modeling/train.py --gpu --dataset hover --dataset_dir data/ --model_path models/hover_albert_1e5 --lr 1e-5 --pretrained_path 'albert-base-v2' --labels 2 --epochs 2 --mode test_from_file --test_dir data/hover_nei.jsonl
-
-python3.8 modeling/train.py --gpu --dataset vitaminc --dataset_dir data/vitaminc --model_path models/vitaminc_bert_1e5 --lr 1e-5 --pretrained_path 'bert-base-uncased' --labels 3 --epochs 2 --mode test_from_file --test_dir data/vitaminc_const.jsonl
-python3.8 modeling/train.py --gpu --dataset vitaminc --dataset_dir data/vitaminc --model_path models/vitaminc_roberta_1e5 --lr 1e-5 --pretrained_path 'roberta-base' --labels 3 --epochs 2 --mode test_from_file --test_dir data/vitaminc_const.jsonl
-python3.8 modeling/train.py --gpu --dataset vitaminc --dataset_dir data/vitaminc --model_path models/vitaminc_albert_1e5 --lr 1e-5 --pretrained_path 'albert-base-v2' --labels 3 --epochs 2 --mode test_from_file --test_dir data/vitaminc_const.jsonl
-"""
