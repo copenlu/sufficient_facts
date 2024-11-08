@@ -2,7 +2,7 @@
 The **SufficientFacts** diagnostic test dataset can be found in:
 
 * [data/sufficient_facts](data/sufficient_facts) directory 
-* through the [HuggingFace datasets hub](https://huggingface.co/datasets/pepa/sufficient_facts)
+* through the [HuggingFace datasets hub](https://huggingface.co/datasets/copenlu/sufficient_facts)
 
 Please, consult the README in the corresponding locations for more information on the dataset. 
 
